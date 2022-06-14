@@ -1,5 +1,8 @@
 package com.alexvas.rtsp;
 
+import android.content.Context;
+import android.os.Build;
+import android.os.Environment;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.util.Log;
@@ -7,6 +10,7 @@ import android.util.Pair;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 
 import com.alexvas.rtsp.parser.AacParser;
 import com.alexvas.rtsp.parser.RtpParser;
@@ -14,7 +18,10 @@ import com.alexvas.rtsp.parser.VideoRtpParser;
 import com.alexvas.utils.NetUtils;
 import com.alexvas.utils.VideoCodecUtils;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -123,7 +130,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class RtspClient {
 
     private static final String TAG = RtspClient.class.getSimpleName();
-            static final String TAG_DEBUG = TAG + " DBG";
+    static final String TAG_DEBUG_OUTPUT = TAG + " DBG" + " Output";
+    static final String TAG_DEBUG_INPUT = TAG + " DBG" + " Input";
     private static final boolean DEBUG = false;
 
     public final static int RTSP_CAPABILITY_NONE          = 0;
@@ -219,7 +227,7 @@ public class RtspClient {
     private final @NonNull AtomicBoolean exitFlag;
     private final @NonNull RtspClientListener listener;
 
-//  private boolean sendOptionsCommand;
+    //  private boolean sendOptionsCommand;
     private final boolean requestVideo;
     private final boolean requestAudio;
     private final boolean debug;
@@ -227,7 +235,10 @@ public class RtspClient {
     private final @Nullable String password;
     private final @Nullable String userAgent;
 
-    private RtspClient(@NonNull RtspClient.Builder builder) {
+    private FileWriterState fileWriterState;
+
+    @RequiresApi(api = Build.VERSION_CODES.O)
+    private RtspClient(@NonNull RtspClient.Builder builder, Context context) {
         rtspSocket = builder.rtspSocket;
         uriRtsp = builder.uriRtsp;
         exitFlag = builder.exitFlag;
@@ -239,6 +250,35 @@ public class RtspClient {
         password = builder.password;
         debug = builder.debug;
         userAgent = builder.userAgent;
+
+
+        System.out.println("Path : " + Environment.getExternalStorageDirectory().getPath());
+        String timeString = String.valueOf(System.currentTimeMillis());
+        timeString.replaceAll(":", ".");
+
+        String fileName = "ClientServerLog_" + timeString + ".txt";
+
+        String filePath = context.getExternalFilesDir(Environment.getExternalStorageDirectory().getPath()) + "/ServerClientLogs/" +  fileName;
+
+//
+//         File folderCreate = new File(context.getExternalFilesDir(Environment.getExternalStorageState()) + "/ServerClientLogs");
+//         folderCreate.mkdir();
+
+//        if (Files.notExists(Paths.get(Environment.getExternalStorageDirectory().getPath() + "/ClientLogs/"))) {
+//            File folderPath = new File(Environment.getExternalStorageDirectory().getPath() + "/ClientLogs/");
+//            boolean folderCreated = folderPath.mkdir();
+//            Log.d(TAG, "Folder Created : " + folderCreated);
+//        }
+        File file = new File(filePath);
+        file.getParentFile().mkdirs();
+        try {
+            fileWriterState = new FileWriterState(file);
+            Log.i(TAG, "File Created : " + file.getAbsolutePath() + " : " + file.getName());
+        }
+        catch (Exception e) {
+            Log.e(TAG, "Exception While Trying to create FileWriter");
+            e.printStackTrace();
+        }
     }
 
     public void execute() {
@@ -246,9 +286,19 @@ public class RtspClient {
             Log.v(TAG, "execute()");
         listener.onRtspConnecting();
         try {
-            final InputStream inputStream = rtspSocket.getInputStream();
+
+            final InputStream inputStream = debug ?
+                    new LoggerInputStream(rtspSocket.getInputStream(), fileWriterState) :
+                    new BufferedInputStream(rtspSocket.getInputStream());
+
+//            inputStream.read();
+
+
+//            final InputStream inputStream = rtspSocket.getInputStream();
+
+
             final OutputStream outputStream = debug ?
-                    new LoggerOutputStream(rtspSocket.getOutputStream()) :
+                    new LoggerOutputStream(rtspSocket.getOutputStream(), fileWriterState) :
                     new BufferedOutputStream(rtspSocket.getOutputStream());
 
             SdpInfo sdpInfo = new SdpInfo();
@@ -352,7 +402,7 @@ public class RtspClient {
             if (contentLength > 0) {
                 String content = readContentAsText(inputStream, contentLength);
                 if (debug)
-                    Log.i(TAG_DEBUG, "" + content);
+                    Log.i(TAG_DEBUG_OUTPUT, "" + content);
                 try {
                     List<Pair<String, String>> params = getDescribeParams(content);
                     sdpInfo = getSdpInfoFromDescribeParams(params);
@@ -362,7 +412,7 @@ public class RtspClient {
                         sdpInfo.audioTrack = null;
                     // Only AAC supported
                     if (sdpInfo.audioTrack != null && sdpInfo.audioTrack.audioCodec != AUDIO_CODEC_AAC) {
-                        Log.e(TAG_DEBUG, "Unknown RTSP audio codec (" + sdpInfo.audioTrack.audioCodec + ") specified in SDP");
+                        Log.e(TAG_DEBUG_OUTPUT, "Unknown RTSP audio codec (" + sdpInfo.audioTrack.audioCodec + ") specified in SDP");
                         sdpInfo.audioTrack = null;
                     }
                 } catch (Exception e) {
@@ -483,7 +533,7 @@ public class RtspClient {
                         //CSeq: 6
                         //Session: 4066342621205
                         if (debug)
-                            Log.d(TAG_DEBUG, "Sending keep-alive");
+                            Log.d(TAG_DEBUG_OUTPUT, "Sending keep-alive");
                         if (hasCapability(RTSP_CAPABILITY_GET_PARAMETER, capabilities))
                             sendGetParameterCommand(outputStream, uriRtsp, cSeq.addAndGet(1), userAgent, sessionFinal, authTokenFinal);
                         else
@@ -578,7 +628,7 @@ public class RtspClient {
             @NonNull RtspClientListener listener,
             int keepAliveTimeout,
             @NonNull RtspClientKeepAliveListener keepAliveListener)
-    throws IOException {
+            throws IOException {
         byte[] data = new byte[0]; // Usually not bigger than MTU = 15KB
 
         final VideoRtpParser videoParser = new VideoRtpParser();
@@ -656,7 +706,7 @@ public class RtspClient {
                     }
                 }
 
-            // Audio
+                // Audio
             } else if (sdpInfo.audioTrack != null && header.payloadType == sdpInfo.audioTrack.payloadType) {
                 if (audioParser != null) {
                     byte[] sample = audioParser.processRtpPacketAndGetSample(data, header.payloadSize);
@@ -664,7 +714,7 @@ public class RtspClient {
                         listener.onRtspAudioSampleReceived(sample, 0, sample.length, (long) (header.timeStamp * 11.111111));
                 }
 
-            // Unknown
+                // Unknown
             } else {
                 // https://www.iana.org/assignments/rtp-parameters/rtp-parameters.xhtml
                 if (DEBUG && header.payloadType >= 96 && header.payloadType <= 127)
@@ -681,7 +731,7 @@ public class RtspClient {
             @Nullable String userAgent,
             @Nullable String session,
             @Nullable String authToken)
-    throws IOException {
+            throws IOException {
         outputStream.write((command + " " + request + " RTSP/1.0" + CRLF).getBytes());
         if (authToken != null)
             outputStream.write(("Authorization: " + authToken + CRLF).getBytes());
@@ -700,9 +750,9 @@ public class RtspClient {
             int cSeq,
             @Nullable String userAgent,
             @Nullable String authToken)
-    throws IOException {
+            throws IOException {
         if (DEBUG)
-            Log.v(TAG, "sendOptionsCommand(request=\"" + request + "\", cSeq=" + cSeq + ")");
+            Log.i(TAG, "sendOptionsCommand(request=\"" + request + "\", cSeq=" + cSeq + ")");
         sendSimpleCommand("OPTIONS", outputStream, request, cSeq, userAgent, null, authToken);
     }
 
@@ -713,7 +763,7 @@ public class RtspClient {
             @Nullable String userAgent,
             @Nullable String session,
             @Nullable String authToken)
-    throws IOException {
+            throws IOException {
         if (DEBUG)
             Log.v(TAG, "sendGetParameterCommand(request=\"" + request + "\", cSeq=" + cSeq + ")");
         sendSimpleCommand("GET_PARAMETER", outputStream, request, cSeq, userAgent, session, authToken);
@@ -725,7 +775,7 @@ public class RtspClient {
             int cSeq,
             @Nullable String userAgent,
             @Nullable String authToken)
-    throws IOException {
+            throws IOException {
         if (DEBUG)
             Log.v(TAG, "sendDescribeCommand(request=\"" + request + "\", cSeq=" + cSeq + ")");
         outputStream.write(("DESCRIBE " + request + " RTSP/1.0" + CRLF).getBytes());
@@ -746,7 +796,7 @@ public class RtspClient {
             @Nullable String userAgent,
             @Nullable String authToken,
             @Nullable String session)
-    throws IOException {
+            throws IOException {
         if (DEBUG)
             Log.v(TAG, "sendTeardownCommand(request=\"" + request + "\", cSeq=" + cSeq + ")");
         outputStream.write(("TEARDOWN " + request + " RTSP/1.0" + CRLF).getBytes());
@@ -769,7 +819,7 @@ public class RtspClient {
             @Nullable String authToken,
             @Nullable String session,
             @NonNull String interleaved)
-    throws IOException {
+            throws IOException {
         if (DEBUG)
             Log.v(TAG, "sendSetupCommand(request=\"" + request + "\", cSeq=" + cSeq + ")");
         outputStream.write(("SETUP " + request + " RTSP/1.0" + CRLF).getBytes());
@@ -792,7 +842,7 @@ public class RtspClient {
             @Nullable String userAgent,
             @Nullable String authToken,
             @NonNull String session)
-    throws IOException {
+            throws IOException {
         if (DEBUG)
             Log.v(TAG, "sendPlayCommand(request=\"" + request + "\", cSeq=" + cSeq + ")");
         outputStream.write(("PLAY " + request + " RTSP/1.0" + CRLF).getBytes());
@@ -816,24 +866,24 @@ public class RtspClient {
         // Search fpr "RTSP/1.0 "
         while (!exitFlag.get() && readUntilBytesFound(inputStream, rtspHeader) && (line = readLine(inputStream)) != null) {
             if (debug)
-                Log.d(TAG_DEBUG, "" + line);
+                Log.d(TAG_DEBUG_OUTPUT, "" + line);
 //            int indexRtsp = line.indexOf("TSP/1.0 "); // 8 characters, 'R' already found
 //            if (indexRtsp >= 0) {
-                int indexCode = line.indexOf(' ');
-                String code = line.substring(0, indexCode);
-                try {
-                    int statusCode = Integer.parseInt(code);
-                    if (debug)
-                        Log.d(TAG_DEBUG, "Status code: " + statusCode);
-                    return statusCode;
-                } catch (NumberFormatException e) {
-                    // Does not fulfill standard "RTSP/1.1 200 OK" token
-                    // Continue search for
-                }
+            int indexCode = line.indexOf(' ');
+            String code = line.substring(0, indexCode);
+            try {
+                int statusCode = Integer.parseInt(code);
+                if (debug)
+                    Log.d(TAG_DEBUG_OUTPUT, "Status code: " + statusCode);
+                return statusCode;
+            } catch (NumberFormatException e) {
+                // Does not fulfill standard "RTSP/1.1 200 OK" token
+                // Continue search for
+            }
 //            }
         }
         if (debug)
-            Log.w(TAG_DEBUG, "Could not obtain status code");
+            Log.w(TAG_DEBUG_OUTPUT, "Could not obtain status code");
         return -1;
     }
 
@@ -843,7 +893,7 @@ public class RtspClient {
         String line;
         while (!exitFlag.get() && !TextUtils.isEmpty(line = readLine(inputStream))) {
             if (debug)
-                Log.d(TAG_DEBUG, "" + line);
+                Log.d(TAG_DEBUG_OUTPUT, "" + line);
             if (CRLF.equals(line)) {
                 return headers;
             } else {
@@ -872,7 +922,7 @@ public class RtspClient {
                         currentTrack = new VideoTrack();
                         tracks[0] = currentTrack;
 
-                    // m=audio 0 RTP/AVP 97
+                        // m=audio 0 RTP/AVP 97
                     } else if (param.second.startsWith("audio")) {
                         currentTrack = new AudioTrack();
                         tracks[1] = currentTrack;
@@ -895,25 +945,25 @@ public class RtspClient {
                         if (param.second.startsWith("control:")) {
                             currentTrack.request = param.second.substring(8);
 
-                        // a=fmtp:96 packetization-mode=1; profile-level-id=4D4029; sprop-parameter-sets=Z01AKZpmBkCb8uAtQEBAQXpw,aO48gA==
-                        // a=fmtp:97 streamtype=5; profile-level-id=15; mode=AAC-hbr; config=1408; sizeLength=13; indexLength=3; indexDeltaLength=3; profile=1; bitrate=32000;
-                        // a=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1408
-                        // a=fmtp:96 streamtype=5; profile-level-id=14; mode=AAC-lbr; config=1388; sizeLength=6; indexLength=2; indexDeltaLength=2; constantDuration=1024; maxDisplacement=5
-                        // a=fmtp:96 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1210fff15081ffdffc
+                            // a=fmtp:96 packetization-mode=1; profile-level-id=4D4029; sprop-parameter-sets=Z01AKZpmBkCb8uAtQEBAQXpw,aO48gA==
+                            // a=fmtp:97 streamtype=5; profile-level-id=15; mode=AAC-hbr; config=1408; sizeLength=13; indexLength=3; indexDeltaLength=3; profile=1; bitrate=32000;
+                            // a=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1408
+                            // a=fmtp:96 streamtype=5; profile-level-id=14; mode=AAC-lbr; config=1388; sizeLength=6; indexLength=2; indexDeltaLength=2; constantDuration=1024; maxDisplacement=5
+                            // a=fmtp:96 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1210fff15081ffdffc
                         } else if (param.second.startsWith("fmtp:")) {
                             // Video
                             if (currentTrack instanceof VideoTrack) {
                                 updateVideoTrackFromDescribeParam((VideoTrack)tracks[0], param);
-                            // Audio
+                                // Audio
                             } else {
                                 updateAudioTrackFromDescribeParam((AudioTrack)tracks[1], param);
                             }
 
-                        // a=rtpmap:96 H264/90000
-                        // a=rtpmap:97 mpeg4-generic/16000/1
-                        // a=rtpmap:97 MPEG4-GENERIC/16000
-                        // a=rtpmap:97 G726-32/8000
-                        // a=rtpmap:96 mpeg4-generic/44100/2
+                            // a=rtpmap:96 H264/90000
+                            // a=rtpmap:97 mpeg4-generic/16000/1
+                            // a=rtpmap:97 MPEG4-GENERIC/16000
+                            // a=rtpmap:97 G726-32/8000
+                            // a=rtpmap:96 mpeg4-generic/44100/2
                         } else if (param.second.startsWith("rtpmap:")) {
                             // Video
                             if (currentTrack instanceof VideoTrack) {
@@ -930,7 +980,7 @@ public class RtspClient {
                                         Log.i(TAG, "Video: " + values[0]);
                                     }
                                 }
-                            // Audio
+                                // Audio
                             } else {
                                 String[] values = TextUtils.split(param.second, " ");
                                 if (values.length > 1) {
@@ -1065,29 +1115,29 @@ public class RtspClient {
             for (Pair<String, String> pair: params) {
                 switch (pair.first.toLowerCase()) {
                     case "sprop-parameter-sets":
-                        {
-                            String[] paramsSpsPps = TextUtils.split(pair.second, ",");
-                            if (paramsSpsPps.length > 1) {
-                                byte[] sps = Base64.decode(paramsSpsPps[0], Base64.NO_WRAP);
-                                byte[] pps = Base64.decode(paramsSpsPps[1], Base64.NO_WRAP);
-                                byte[] nalSps = new byte[sps.length + 4];
-                                byte[] nalPps = new byte[pps.length + 4];
-                                // Add 00 00 00 01 NAL unit header
-                                nalSps[0] = 0;
-                                nalSps[1] = 0;
-                                nalSps[2] = 0;
-                                nalSps[3] = 1;
-                                System.arraycopy(sps, 0, nalSps, 4, sps.length);
-                                nalPps[0] = 0;
-                                nalPps[1] = 0;
-                                nalPps[2] = 0;
-                                nalPps[3] = 1;
-                                System.arraycopy(pps, 0, nalPps, 4, pps.length);
-                                videoTrack.sps = nalSps;
-                                videoTrack.pps = nalPps;
-                            }
+                    {
+                        String[] paramsSpsPps = TextUtils.split(pair.second, ",");
+                        if (paramsSpsPps.length > 1) {
+                            byte[] sps = Base64.decode(paramsSpsPps[0], Base64.NO_WRAP);
+                            byte[] pps = Base64.decode(paramsSpsPps[1], Base64.NO_WRAP);
+                            byte[] nalSps = new byte[sps.length + 4];
+                            byte[] nalPps = new byte[pps.length + 4];
+                            // Add 00 00 00 01 NAL unit header
+                            nalSps[0] = 0;
+                            nalSps[1] = 0;
+                            nalSps[2] = 0;
+                            nalSps[3] = 1;
+                            System.arraycopy(sps, 0, nalSps, 4, sps.length);
+                            nalPps[0] = 0;
+                            nalPps[1] = 0;
+                            nalPps[2] = 0;
+                            nalPps[3] = 1;
+                            System.arraycopy(pps, 0, nalPps, 4, pps.length);
+                            videoTrack.sps = nalSps;
+                            videoTrack.pps = nalPps;
                         }
-                        break;
+                    }
+                    break;
                 }
             }
         }
@@ -1417,7 +1467,7 @@ public class RtspClient {
         private final @NonNull String uriRtsp;
         private final @NonNull AtomicBoolean exitFlag;
         private final @NonNull RtspClientListener listener;
-//      private boolean sendOptionsCommand = true;
+        //      private boolean sendOptionsCommand = true;
         private boolean requestVideo = true;
         private boolean requestAudio = true;
         private boolean debug = false;
@@ -1473,19 +1523,29 @@ public class RtspClient {
             return this;
         }
 
+        @RequiresApi(api = Build.VERSION_CODES.O)
         @NonNull
-        public RtspClient build() {
-            return new RtspClient(this);
+        public RtspClient build(Context context) {
+            return new RtspClient(this, context);
         }
     }
 }
 
 class LoggerOutputStream extends BufferedOutputStream {
     private boolean logging = true;
+    private FileWriterState fileWriter;
 
-    public LoggerOutputStream(@NonNull OutputStream out) {
+    public LoggerOutputStream(@NonNull OutputStream out, FileWriterState fileWriter) {
         super(out);
+        this.fileWriter = fileWriter;
     }
+
+//    @Override
+//    public void write(byte[] b) throws IOException {
+//        super.write(b);
+//        if (logging)
+//            Log.i(RtspClient.TAG_DEBUG_INPUT, new String(b));
+//    }
 
     public synchronized void setLogging(boolean logging) {
         this.logging = logging;
@@ -1494,7 +1554,61 @@ class LoggerOutputStream extends BufferedOutputStream {
     @Override
     public synchronized void write(byte[] b, int off, int len) throws IOException {
         super.write(b, off, len);
-        if (logging)
-            Log.i(RtspClient.TAG_DEBUG, new String(b, off, len));
+        if (logging) {
+//            Log.i(RtspClient.TAG_DEBUG_OUTPUT, new String(b, off, len));
+            fileWriter.writeOutput(new String(b, off, len));
+        }
     }
+}
+
+
+class LoggerInputStream extends BufferedInputStream {
+
+    private  FileWriterState fileWriter;
+
+    public LoggerInputStream(InputStream in, FileWriterState fileWriter) {
+        super(in);
+        this.fileWriter = fileWriter;
+    }
+
+    @Override
+    public int read() throws IOException {
+        return 0;
+    }
+
+    @Override
+    public int read(byte[] b, int off, int len) throws IOException {
+        int numberOfByteRead = super.read(b, off, len);
+//        Log.i(RtspClient.TAG_DEBUG_INPUT, new String(b, off, len));
+        fileWriter.writeInput(new String(b, off, len));
+        return numberOfByteRead;
+    }
+}
+
+
+class FileWriterState extends  FileWriter {
+    Boolean isWritingInput = null;
+
+    public FileWriterState(File file) throws IOException {
+        super(file);
+    }
+
+    void writeInput(String input) throws IOException {
+        if(isWritingInput == null || !isWritingInput) {
+            write("ServerToClient \n");
+            isWritingInput = true;
+        }
+        write(input);
+        flush();
+    }
+
+    void writeOutput(String input) throws IOException {
+        if(isWritingInput == null || isWritingInput) {
+            write("ClientToServer \n");
+            isWritingInput = false;
+        }
+        write(input);
+        flush();
+    }
+
 }

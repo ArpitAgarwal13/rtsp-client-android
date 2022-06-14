@@ -224,7 +224,7 @@ open class RtspSurfaceView: SurfaceView {
                     .withDebug(debug)
                     .withUserAgent(userAgent)
                     .withCredentials(username, password)
-                    .build()
+                    .build(context)
                 rtspClient.execute()
 
                 NetUtils.closeSocket(socket)
